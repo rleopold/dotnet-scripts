@@ -237,6 +237,44 @@ update_via_brew() {
   fi
 }
 
+highest_installed_sdk_version() {
+  local install_dir="$1"
+  local sdk_dir="${install_dir}/sdk"
+
+  if [[ ! -d "${sdk_dir}" ]]; then
+    return 0
+  fi
+
+  local entry
+  local versions=()
+  for entry in "${sdk_dir}"/*; do
+    if [[ -d "${entry}" ]]; then
+      versions+=("$(basename "${entry}")")
+    fi
+  done
+
+  if [[ "${#versions[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  printf '%s\n' "${versions[@]}" | sort -V | tail -n 1
+}
+
+resolve_target_version() {
+  local install_script="$1"
+  local install_dir="$2"
+  shift 2
+
+  local dry_run_output
+  if ! dry_run_output=$(bash "${install_script}" --install-dir "${install_dir}" "$@" --dry-run 2>&1); then
+    return 0
+  fi
+
+  if [[ "${dry_run_output}" =~ --version[[:space:]]+\"?([0-9][^\"[:space:]]*) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  fi
+}
+
 run_microsoft_installer() {
   local install_script="$1"
   local install_dir="$2"
@@ -250,12 +288,29 @@ run_microsoft_installer() {
     channel_args+=("--quality" "${quality}")
   fi
 
+  # Installing an older SDK over a newer one would overwrite the shared
+  # unversioned files (the `dotnet` muxer and friends) with older copies,
+  # breaking every newer SDK in the same directory.
+  local installer_args=("${channel_args[@]}")
+  local installed_version
+  local target_version
+  installed_version=$(highest_installed_sdk_version "${install_dir}")
+  target_version=$(resolve_target_version "${install_script}" "${install_dir}" "${channel_args[@]}")
+  if [[ -n "${installed_version}" && -n "${target_version}" ]]; then
+    local newest
+    newest=$(printf '%s\n%s\n' "${installed_version}" "${target_version}" | sort -V | tail -n 1)
+    if [[ "${newest}" != "${target_version}" ]]; then
+      log "Target ${target_version} is older than installed ${installed_version}; preserving non-versioned files."
+      installer_args+=("--skip-non-versioned-files")
+    fi
+  fi
+
   local install_selection="channel: ${channel}"
   if [[ -n "${quality}" ]]; then
     install_selection+=", quality: ${quality}"
   fi
   log "Running dotnet-install.sh into ${install_dir} (${install_selection})..."
-  bash "${install_script}" --install-dir "${install_dir}" "${channel_args[@]}"
+  bash "${install_script}" --install-dir "${install_dir}" "${installer_args[@]}"
 }
 
 install_via_microsoft() {
@@ -295,22 +350,45 @@ install_via_microsoft() {
   trap - EXIT
 }
 
+DOTNET_ROOT_EXPORT='export DOTNET_ROOT="$HOME/.dotnet"'
+# zsh sources .zprofile then .zshrc, so an unguarded prepend runs twice per
+# login shell. Both files are still written: IDEs such as Rider harvest the
+# environment from a login shell, while bare `zsh` reads only .zshrc.
+PATH_EXPORT='[[ ":$PATH:" == *":$DOTNET_ROOT:"* ]] || export PATH="$DOTNET_ROOT:$PATH"'
+LEGACY_PATH_EXPORT='export PATH="$DOTNET_ROOT:$PATH"'
+
+replace_legacy_path_export() {
+  local file="$1"
+
+  if ! grep -Fqx "${LEGACY_PATH_EXPORT}" "${file}"; then
+    return 0
+  fi
+
+  local tmp
+  tmp=$(mktemp)
+  awk -v legacy="${LEGACY_PATH_EXPORT}" -v replacement="${PATH_EXPORT}" \
+    '$0 == legacy { print replacement; next } { print }' "${file}" >"${tmp}"
+  cat "${tmp}" >"${file}"
+  rm -f "${tmp}"
+  log "Replaced unguarded PATH export in ${file}."
+}
+
 append_shell_exports() {
   local file="$1"
-  local dotnet_root_export='export DOTNET_ROOT="$HOME/.dotnet"'
-  local path_export='export PATH="$DOTNET_ROOT:$PATH"'
 
   if [[ ! -f "${file}" ]]; then
     touch "${file}"
   fi
 
-  if ! grep -Fq "$dotnet_root_export" "${file}"; then
-    printf '\n%s\n' "$dotnet_root_export" >> "${file}"
+  if ! grep -Fqx "${DOTNET_ROOT_EXPORT}" "${file}"; then
+    printf '\n%s\n' "${DOTNET_ROOT_EXPORT}" >> "${file}"
     log "Added DOTNET_ROOT to ${file}."
   fi
 
-  if ! grep -Fq "$path_export" "${file}"; then
-    printf '\n%s\n' "$path_export" >> "${file}"
+  replace_legacy_path_export "${file}"
+
+  if ! grep -Fqx "${PATH_EXPORT}" "${file}"; then
+    printf '\n%s\n' "${PATH_EXPORT}" >> "${file}"
     log "Added PATH update to ${file}."
   fi
 }
