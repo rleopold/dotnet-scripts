@@ -14,13 +14,21 @@ Updates or installs .NET using either Homebrew (if detected) or the Microsoft in
 Usage:
 
 ```bash
-./dotnet-update [--lts | --sts | --channel <value>]
+./dotnet-update [--lts | --sts | --channel <value> [--quality <value>]]
 ```
 
 Options:
 - `--lts` (default): Install the latest Long-Term Support release.
 - `--sts`: Install the latest Short-Term Support release.
-- `--channel <value>`: Pass an explicit channel to `dotnet-install` (for example: `Current`, `9.0`, `preview`).
+- `--channel <value>`: Install from a numbered channel (for example: `11.0` or `11.0.1xx`).
+- `--quality <value>`: Install the latest `GA`, `preview`, or `daily` build in the specified
+  channel. This requires `--channel` and cannot be combined with `--lts` or `--sts`.
+
+For example, install the latest public .NET 11 preview:
+
+```bash
+./dotnet-update --channel 11.0 --quality preview
+```
 
 Notes:
 - If Homebrew is detected, this uses `brew upgrade` for the installed `dotnet`/`dotnet-sdk` formula or cask.
@@ -41,7 +49,8 @@ Usage:
 Interactive flow:
 - Detects installed SDKs and runtimes via `dotnet --list-sdks` / `dotnet --list-runtimes`.
 - Prompts for SDK vs runtime.
-- Prompts for the version to remove.
+- Prompts for one or more versions to remove. Enter selections separated by spaces, such as `1 2 4 5`.
+- Validates the full selection and asks for one confirmation before removing the selected directories.
 - Repeats until you choose to stop.
 
 Non-interactive examples:
@@ -71,3 +80,7 @@ chmod +x dotnet-update dotnet-remove
 ```
 
 Optionally add this repo to your PATH or symlink the scripts into a bin directory.
+
+## License
+
+This project is available under the [MIT License](LICENSE).

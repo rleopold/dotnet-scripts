@@ -15,6 +15,7 @@ Usage: dotnet-remove [--help] [--sdk <version>] [--runtime <name> <version>]
 
 Removes a .NET SDK or runtime installed via dotnet-install (typically under ~/.dotnet).
 Use --sdk or --runtime for non-interactive removal.
+Interactive version prompts accept one or more numbers separated by spaces.
 
 If Homebrew manages your .NET install, this script will exit and ask you to use brew instead.
 USAGE
@@ -122,11 +123,81 @@ choose_from_list() {
     if [[ "${choice}" == "0" ]]; then
       return 1
     fi
-    if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#items[@]} )); then
-      printf '%s' "$((choice - 1))"
+    if [[ "${choice}" =~ ^[0-9]+$ ]]; then
+      local choice_number=$((10#${choice}))
+      if (( choice_number >= 1 && choice_number <= ${#items[@]} )); then
+        printf '%s' "$((choice_number - 1))"
+        return 0
+      fi
+    fi
+    printf '==> Invalid selection.\n' >&2
+  done
+}
+
+choose_multiple_from_list() {
+  local prompt="$1"
+  shift
+  local items=("$@")
+
+  while true; do
+    printf '==> %s\n' "${prompt}" >&2
+    local i
+    for i in "${!items[@]}"; do
+      printf '  %d) %s\n' "$((i + 1))" "${items[i]}" >&2
+    done
+    printf '  0) Cancel\n' >&2
+    printf 'Enter one or more numbers separated by spaces.\n' >&2
+    printf '> ' >&2
+
+    local choice
+    read -r choice
+    if [[ "${choice}" == "0" ]]; then
+      return 1
+    fi
+
+    local selections=()
+    read -r -a selections <<<"${choice}"
+    if [[ ${#selections[@]} -eq 0 ]]; then
+      printf '==> Invalid selection.\n' >&2
+      continue
+    fi
+
+    local indexes=()
+    local selection selection_number index existing duplicate invalid
+    invalid=0
+    for selection in "${selections[@]}"; do
+      if [[ ! "${selection}" =~ ^[0-9]+$ ]]; then
+        invalid=1
+        break
+      fi
+
+      selection_number=$((10#${selection}))
+      if (( selection_number < 1 || selection_number > ${#items[@]} )); then
+        invalid=1
+        break
+      fi
+
+      index=$((selection_number - 1))
+      duplicate=0
+      if [[ ${#indexes[@]} -gt 0 ]]; then
+        for existing in "${indexes[@]}"; do
+          if [[ "${existing}" -eq "${index}" ]]; then
+            duplicate=1
+            break
+          fi
+        done
+      fi
+      if [[ "${duplicate}" -eq 0 ]]; then
+        indexes+=("${index}")
+      fi
+    done
+
+    if [[ "${invalid}" -eq 0 ]]; then
+      printf '%s' "${indexes[*]}"
       return 0
     fi
-    log "Invalid selection."
+
+    printf '==> Invalid selection. Enter only listed numbers, or 0 to cancel.\n' >&2
   done
 }
 
@@ -142,19 +213,7 @@ remove_target_dir() {
   local target_dir="$1"
   local install_dir="$2"
 
-  if [[ ! -d "${target_dir}" ]]; then
-    log "Path does not exist: ${target_dir}"
-    exit 1
-  fi
-
-  case "${target_dir}/" in
-    "${install_dir}/"*)
-      ;;
-    *)
-      log "Refusing to remove outside install dir (${install_dir}): ${target_dir}"
-      exit 1
-      ;;
-  esac
+  validate_target_dir "${target_dir}" "${install_dir}"
 
   if [[ "${NON_INTERACTIVE}" -ne 1 ]]; then
     if ! confirm "Remove ${target_dir}?"; then
@@ -165,6 +224,58 @@ remove_target_dir() {
 
   rm -rf "${target_dir}"
   log "Removed ${target_dir}"
+}
+
+validate_target_dir() {
+  local target_dir="$1"
+  local install_dir="$2"
+
+  if [[ ! -d "${target_dir}" ]]; then
+    log "Path does not exist: ${target_dir}"
+    return 1
+  fi
+
+  case "${target_dir}/" in
+    "${install_dir}/"*)
+      ;;
+    *)
+      log "Refusing to remove outside install dir (${install_dir}): ${target_dir}"
+      return 1
+      ;;
+  esac
+}
+
+remove_target_dirs() {
+  local install_dir="$1"
+  shift
+  local target_dirs=("$@")
+  local target_dir
+
+  for target_dir in "${target_dirs[@]}"; do
+    if ! validate_target_dir "${target_dir}" "${install_dir}"; then
+      exit 1
+    fi
+  done
+
+  if [[ "${NON_INTERACTIVE}" -ne 1 ]]; then
+    log "Selected directories:"
+    for target_dir in "${target_dirs[@]}"; do
+      printf '  %s\n' "${target_dir}"
+    done
+    local item_word="items"
+    if [[ ${#target_dirs[@]} -eq 1 ]]; then
+      item_word="item"
+    fi
+    if ! confirm "Remove ${#target_dirs[@]} selected ${item_word}?"; then
+      log "Canceled."
+      exit 1
+    fi
+  fi
+
+  for target_dir in "${target_dirs[@]}"; do
+    rm -rf "${target_dir}"
+    log "Removed ${target_dir}"
+  done
 }
 
 collect_dotnet_lists() {
@@ -317,14 +428,20 @@ main() {
         sdk_labels+=("${version}")
       done
 
-      local sdk_index
-      if ! sdk_index=$(choose_from_list "Choose an SDK version to remove:" "${sdk_labels[@]}"); then
+      local sdk_indexes
+      if ! sdk_indexes=$(choose_multiple_from_list "Choose SDK versions to remove:" "${sdk_labels[@]}"); then
         log "Canceled."
         exit 1
       fi
 
-      local target_dir="${sdk_paths[${sdk_index}]}/${sdk_versions[${sdk_index}]}"
-      remove_target_dir "${target_dir}" "${install_dir}"
+      local selected_sdk_indexes=()
+      read -r -a selected_sdk_indexes <<<"${sdk_indexes}"
+      local sdk_target_dirs=()
+      local sdk_index
+      for sdk_index in "${selected_sdk_indexes[@]}"; do
+        sdk_target_dirs+=("${sdk_paths[${sdk_index}]}/${sdk_versions[${sdk_index}]}")
+      done
+      remove_target_dirs "${install_dir}" "${sdk_target_dirs[@]}"
     else
       local runtime_names=()
       local runtime_versions=()
@@ -342,14 +459,20 @@ main() {
         runtime_labels+=("${runtime_name} ${runtime_version}")
       done
 
-      local runtime_index
-      if ! runtime_index=$(choose_from_list "Choose a runtime to remove:" "${runtime_labels[@]}"); then
+      local runtime_indexes
+      if ! runtime_indexes=$(choose_multiple_from_list "Choose runtimes to remove:" "${runtime_labels[@]}"); then
         log "Canceled."
         exit 1
       fi
 
-      local target_dir="${runtime_paths[${runtime_index}]}/${runtime_versions[${runtime_index}]}"
-      remove_target_dir "${target_dir}" "${install_dir}"
+      local selected_runtime_indexes=()
+      read -r -a selected_runtime_indexes <<<"${runtime_indexes}"
+      local runtime_target_dirs=()
+      local runtime_index
+      for runtime_index in "${selected_runtime_indexes[@]}"; do
+        runtime_target_dirs+=("${runtime_paths[${runtime_index}]}/${runtime_versions[${runtime_index}]}")
+      done
+      remove_target_dirs "${install_dir}" "${runtime_target_dirs[@]}"
     fi
 
     collect_dotnet_lists "${dotnet_bin}"

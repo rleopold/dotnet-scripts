@@ -11,31 +11,39 @@ command_exists() {
 
 usage() {
   cat <<'USAGE'
-Usage: dotnet-update [--lts | --sts | --channel <value>] [--help]
+Usage: dotnet-update [--lts | --sts | --channel <value> [--quality <value>]] [--help]
 
 Options:
   --lts                Install the latest Long-Term Support release (default).
   --sts                Install the latest Short-Term Support release (maps to the "STS" channel).
-  --channel <value>    Pass an explicit channel to dotnet-install (e.g., "Current", "9.0", "preview").
+  --channel <value>    Install from a numbered channel (for example, "11.0" or "11.0.1xx").
+  --quality <value>    Install the latest GA, preview, or daily build in the specified channel.
+                       Requires --channel and cannot be combined with --lts or --sts.
   -h, --help           Show this help message and exit.
 
-The channel option only affects installs performed via the Microsoft installer. Homebrew-managed
-installs are upgraded using the existing formula or cask version.
+The channel and quality options only affect installs performed via the Microsoft installer.
+Homebrew-managed installs are upgraded using the existing formula or cask version.
 USAGE
 }
 
 DOTNET_CHANNEL="LTS"
+DOTNET_QUALITY=""
+EXPLICIT_CHANNEL=0
 
 parse_args() {
   DOTNET_CHANNEL="LTS"
+  DOTNET_QUALITY=""
+  EXPLICIT_CHANNEL=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --lts)
         DOTNET_CHANNEL="LTS"
+        EXPLICIT_CHANNEL=0
         shift
         ;;
       --sts)
         DOTNET_CHANNEL="STS"
+        EXPLICIT_CHANNEL=0
         shift
         ;;
       --channel)
@@ -45,6 +53,31 @@ parse_args() {
           exit 1
         fi
         DOTNET_CHANNEL="$2"
+        EXPLICIT_CHANNEL=1
+        shift 2
+        ;;
+      --quality)
+        if [[ $# -lt 2 ]]; then
+          log "Missing value for --quality"
+          usage
+          exit 1
+        fi
+        case "$2" in
+          GA|ga|Ga)
+            DOTNET_QUALITY="GA"
+            ;;
+          preview|Preview|PREVIEW)
+            DOTNET_QUALITY="preview"
+            ;;
+          daily|Daily|DAILY)
+            DOTNET_QUALITY="daily"
+            ;;
+          *)
+            log "Invalid quality: $2. Choose GA, preview, or daily."
+            usage
+            exit 1
+            ;;
+        esac
         shift 2
         ;;
       -h|--help)
@@ -58,6 +91,15 @@ parse_args() {
         ;;
     esac
   done
+
+  if [[ -n "${DOTNET_QUALITY}" ]]; then
+    if [[ "${EXPLICIT_CHANNEL}" -ne 1 ]] ||
+      [[ ! "${DOTNET_CHANNEL}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+xx)?$ ]]; then
+      log "--quality requires a numbered --channel such as 11.0 or 11.0.1xx."
+      usage
+      exit 1
+    fi
+  fi
 }
 
 BREW_DOTNET_PACKAGE=""
@@ -127,8 +169,15 @@ install_via_microsoft() {
   if [[ -n "${DOTNET_CHANNEL}" ]]; then
     channel_args+=("--channel" "${DOTNET_CHANNEL}")
   fi
+  if [[ -n "${DOTNET_QUALITY}" ]]; then
+    channel_args+=("--quality" "${DOTNET_QUALITY}")
+  fi
 
-  log "Running dotnet-install.sh into ${install_dir} (channel: ${DOTNET_CHANNEL})..."
+  local install_selection="channel: ${DOTNET_CHANNEL}"
+  if [[ -n "${DOTNET_QUALITY}" ]]; then
+    install_selection+=", quality: ${DOTNET_QUALITY}"
+  fi
+  log "Running dotnet-install.sh into ${install_dir} (${install_selection})..."
   bash "${install_script}" --install-dir "${install_dir}" "${channel_args[@]}"
 
   rm -rf "${tmp_dir}"
