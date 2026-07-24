@@ -11,11 +11,13 @@ command_exists() {
 
 usage() {
   cat <<'USAGE'
-Usage: dotnet-update [--lts | --sts | --channel <value> [--quality <value>]] [--help]
+Usage: dotnet-update [--lts | --sts | --all | --channel <value> [--quality <value>]] [--help]
 
 Options:
   --lts                Install the latest Long-Term Support release (default).
   --sts                Install the latest Short-Term Support release (maps to the "STS" channel).
+  --all                Update every installed SDK channel. Stable channels use GA builds;
+                       prerelease-only channels use preview builds.
   --channel <value>    Install from a numbered channel (for example, "11.0" or "11.0.1xx").
   --quality <value>    Install the latest GA, preview, or daily build in the specified channel.
                        Requires --channel and cannot be combined with --lts or --sts.
@@ -29,21 +31,31 @@ USAGE
 DOTNET_CHANNEL="LTS"
 DOTNET_QUALITY=""
 EXPLICIT_CHANNEL=0
+EXPLICIT_SELECTION=0
+UPDATE_ALL=0
 
 parse_args() {
   DOTNET_CHANNEL="LTS"
   DOTNET_QUALITY=""
   EXPLICIT_CHANNEL=0
+  EXPLICIT_SELECTION=0
+  UPDATE_ALL=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --lts)
         DOTNET_CHANNEL="LTS"
         EXPLICIT_CHANNEL=0
+        EXPLICIT_SELECTION=1
         shift
         ;;
       --sts)
         DOTNET_CHANNEL="STS"
         EXPLICIT_CHANNEL=0
+        EXPLICIT_SELECTION=1
+        shift
+        ;;
+      --all)
+        UPDATE_ALL=1
         shift
         ;;
       --channel)
@@ -54,6 +66,7 @@ parse_args() {
         fi
         DOTNET_CHANNEL="$2"
         EXPLICIT_CHANNEL=1
+        EXPLICIT_SELECTION=1
         shift 2
         ;;
       --quality)
@@ -92,6 +105,18 @@ parse_args() {
     esac
   done
 
+  if [[ "${UPDATE_ALL}" -eq 1 && "${EXPLICIT_SELECTION}" -eq 1 ]]; then
+    log "--all cannot be combined with --lts, --sts, or --channel."
+    usage
+    exit 1
+  fi
+
+  if [[ "${UPDATE_ALL}" -eq 1 && -n "${DOTNET_QUALITY}" ]]; then
+    log "--all cannot be combined with --quality."
+    usage
+    exit 1
+  fi
+
   if [[ -n "${DOTNET_QUALITY}" ]]; then
     if [[ "${EXPLICIT_CHANNEL}" -ne 1 ]] ||
       [[ ! "${DOTNET_CHANNEL}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+xx)?$ ]]; then
@@ -99,6 +124,65 @@ parse_args() {
       usage
       exit 1
     fi
+  fi
+}
+
+ALL_CHANNELS=()
+ALL_QUALITIES=()
+
+collect_installed_channels() {
+  if ! command_exists dotnet; then
+    log "Cannot use --all because dotnet is not on PATH."
+    exit 1
+  fi
+
+  local sdk_list
+  sdk_list=$(dotnet --list-sdks)
+  if [[ -z "${sdk_list}" ]]; then
+    log "Cannot use --all because no installed SDKs were found."
+    exit 1
+  fi
+
+  ALL_CHANNELS=()
+  ALL_QUALITIES=()
+
+  local version
+  local unused
+  local channel
+  local quality
+  local index
+  local found
+  while read -r version unused; do
+    if [[ ! "${version}" =~ ^([0-9]+)\.([0-9]+)\. ]]; then
+      continue
+    fi
+
+    channel="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+    quality="GA"
+    if [[ "${version}" == *-* ]]; then
+      quality="preview"
+    fi
+
+    found=0
+    for index in "${!ALL_CHANNELS[@]}"; do
+      if [[ "${ALL_CHANNELS[${index}]}" == "${channel}" ]]; then
+        found=1
+        if [[ "${quality}" == "GA" ]]; then
+          ALL_QUALITIES[${index}]="GA"
+        fi
+        break
+      fi
+    done
+
+    if [[ "${found}" -eq 0 ]]; then
+      ALL_CHANNELS[${#ALL_CHANNELS[@]}]="${channel}"
+      ALL_QUALITIES[${#ALL_QUALITIES[@]}]="${quality}"
+    fi
+  done <<<"${sdk_list}"
+
+  if [[ "${#ALL_CHANNELS[@]}" -eq 0 ]]; then
+    log "Cannot use --all because no recognizable SDK channels were found."
+    exit 1
   fi
 }
 
@@ -153,9 +237,34 @@ update_via_brew() {
   fi
 }
 
+run_microsoft_installer() {
+  local install_script="$1"
+  local install_dir="$2"
+  local channel="$3"
+  local quality="$4"
+  local channel_args=()
+  if [[ -n "${channel}" ]]; then
+    channel_args+=("--channel" "${channel}")
+  fi
+  if [[ -n "${quality}" ]]; then
+    channel_args+=("--quality" "${quality}")
+  fi
+
+  local install_selection="channel: ${channel}"
+  if [[ -n "${quality}" ]]; then
+    install_selection+=", quality: ${quality}"
+  fi
+  log "Running dotnet-install.sh into ${install_dir} (${install_selection})..."
+  bash "${install_script}" --install-dir "${install_dir}" "${channel_args[@]}"
+}
+
 install_via_microsoft() {
   local install_dir="$HOME/.dotnet"
   mkdir -p "${install_dir}"
+
+  if [[ "${UPDATE_ALL}" -eq 1 ]]; then
+    collect_installed_channels
+  fi
 
   local tmp_dir
   tmp_dir=$(mktemp -d)
@@ -165,20 +274,22 @@ install_via_microsoft() {
   log "Downloading dotnet-install.sh from Microsoft..."
   curl -sSL https://dot.net/v1/dotnet-install.sh -o "${install_script}"
 
-  local channel_args=()
-  if [[ -n "${DOTNET_CHANNEL}" ]]; then
-    channel_args+=("--channel" "${DOTNET_CHANNEL}")
+  if [[ "${UPDATE_ALL}" -eq 1 ]]; then
+    local index
+    for index in "${!ALL_CHANNELS[@]}"; do
+      run_microsoft_installer \
+        "${install_script}" \
+        "${install_dir}" \
+        "${ALL_CHANNELS[${index}]}" \
+        "${ALL_QUALITIES[${index}]}"
+    done
+  else
+    run_microsoft_installer \
+      "${install_script}" \
+      "${install_dir}" \
+      "${DOTNET_CHANNEL}" \
+      "${DOTNET_QUALITY}"
   fi
-  if [[ -n "${DOTNET_QUALITY}" ]]; then
-    channel_args+=("--quality" "${DOTNET_QUALITY}")
-  fi
-
-  local install_selection="channel: ${DOTNET_CHANNEL}"
-  if [[ -n "${DOTNET_QUALITY}" ]]; then
-    install_selection+=", quality: ${DOTNET_QUALITY}"
-  fi
-  log "Running dotnet-install.sh into ${install_dir} (${install_selection})..."
-  bash "${install_script}" --install-dir "${install_dir}" "${channel_args[@]}"
 
   rm -rf "${tmp_dir}"
   trap - EXIT
@@ -216,6 +327,11 @@ main() {
   local used_microsoft_install=0
 
   if is_brew_dotnet_installed; then
+    if [[ "${UPDATE_ALL}" -eq 1 ]]; then
+      log "--all is not supported for Homebrew-managed .NET installations."
+      log "Homebrew can only upgrade the installed formula or cask as a package."
+      exit 1
+    fi
     log "Detected Homebrew-managed .NET installation."
     update_via_brew
   else

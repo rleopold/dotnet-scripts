@@ -14,12 +14,14 @@ Updates or installs .NET using either Homebrew (if detected) or the Microsoft in
 Usage:
 
 ```bash
-./dotnet-update [--lts | --sts | --channel <value> [--quality <value>]]
+./dotnet-update [--lts | --sts | --all | --channel <value> [--quality <value>]]
 ```
 
 Options:
 - `--lts` (default): Install the latest Long-Term Support release.
 - `--sts`: Install the latest Short-Term Support release.
+- `--all`: Update every installed SDK channel. Channels with a stable SDK update to the latest
+  `GA` build; channels containing only prerelease SDKs update to the latest `preview` build.
 - `--channel <value>`: Install from a numbered channel (for example: `11.0` or `11.0.1xx`).
 - `--quality <value>`: Install the latest `GA`, `preview`, or `daily` build in the specified
   channel. This requires `--channel` and cannot be combined with `--lts` or `--sts`.
@@ -30,8 +32,15 @@ For example, install the latest public .NET 11 preview:
 ./dotnet-update --channel 11.0 --quality preview
 ```
 
+Update every installed SDK channel, including preview-only channels:
+
+```bash
+./dotnet-update --all
+```
+
 Notes:
 - If Homebrew is detected, this uses `brew upgrade` for the installed `dotnet`/`dotnet-sdk` formula or cask.
+- `--all` is only supported for Microsoft-installer-managed SDKs.
 - For Microsoft installs, it ensures `DOTNET_ROOT` and `PATH` are exported in `~/.zprofile` and `~/.zshrc`.
 
 ### dotnet-remove
