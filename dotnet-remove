@@ -1,0 +1,370 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() {
+  printf '==> %s\n' "$1"
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+usage() {
+  cat <<'USAGE'
+Usage: dotnet-remove [--help] [--sdk <version>] [--runtime <name> <version>]
+
+Removes a .NET SDK or runtime installed via dotnet-install (typically under ~/.dotnet).
+Use --sdk or --runtime for non-interactive removal.
+
+If Homebrew manages your .NET install, this script will exit and ask you to use brew instead.
+USAGE
+}
+
+BREW_DOTNET_PACKAGE=""
+BREW_DOTNET_IS_CASK=0
+
+is_brew_dotnet_installed() {
+  if ! command_exists brew; then
+    return 1
+  fi
+
+  if brew list dotnet >/dev/null 2>&1; then
+    BREW_DOTNET_PACKAGE="dotnet"
+    BREW_DOTNET_IS_CASK=0
+    return 0
+  fi
+
+  if brew list dotnet-sdk >/dev/null 2>&1; then
+    BREW_DOTNET_PACKAGE="dotnet-sdk"
+    BREW_DOTNET_IS_CASK=0
+    return 0
+  fi
+
+  local casks
+  casks=$(brew list --cask 2>/dev/null || true)
+  if grep -qx 'dotnet-sdk' <<<"${casks}"; then
+    BREW_DOTNET_PACKAGE="dotnet-sdk"
+    BREW_DOTNET_IS_CASK=1
+    return 0
+  fi
+
+  if grep -qx 'dotnet' <<<"${casks}"; then
+    BREW_DOTNET_PACKAGE="dotnet"
+    BREW_DOTNET_IS_CASK=1
+    return 0
+  fi
+
+  return 1
+}
+
+parse_args() {
+  SDK_VERSION=""
+  RUNTIME_NAME=""
+  RUNTIME_VERSION=""
+  NON_INTERACTIVE=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --sdk)
+        if [[ $# -lt 2 ]]; then
+          log "Missing value for --sdk"
+          usage
+          exit 1
+        fi
+        SDK_VERSION="$2"
+        NON_INTERACTIVE=1
+        shift 2
+        ;;
+      --runtime)
+        if [[ $# -lt 3 ]]; then
+          log "Missing values for --runtime"
+          usage
+          exit 1
+        fi
+        RUNTIME_NAME="$2"
+        RUNTIME_VERSION="$3"
+        NON_INTERACTIVE=1
+        shift 3
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        log "Unknown option: $1"
+        usage
+        exit 1
+        ;;
+    esac
+  done
+
+  if [[ -n "${SDK_VERSION}" && -n "${RUNTIME_NAME}" ]]; then
+    log "Choose either --sdk or --runtime, not both."
+    usage
+    exit 1
+  fi
+}
+
+choose_from_list() {
+  local prompt="$1"
+  shift
+  local items=("$@")
+
+  while true; do
+    printf '==> %s\n' "${prompt}" >&2
+    local i
+    for i in "${!items[@]}"; do
+      printf '  %d) %s\n' "$((i + 1))" "${items[i]}" >&2
+    done
+    printf '  0) Cancel\n' >&2
+    printf '> ' >&2
+    local choice
+    read -r choice
+    if [[ "${choice}" == "0" ]]; then
+      return 1
+    fi
+    if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#items[@]} )); then
+      printf '%s' "$((choice - 1))"
+      return 0
+    fi
+    log "Invalid selection."
+  done
+}
+
+confirm() {
+  local prompt="$1"
+  printf '%s [y/N] ' "${prompt}"
+  local answer
+  read -r answer
+  [[ "${answer}" == "y" || "${answer}" == "Y" ]]
+}
+
+remove_target_dir() {
+  local target_dir="$1"
+  local install_dir="$2"
+
+  if [[ ! -d "${target_dir}" ]]; then
+    log "Path does not exist: ${target_dir}"
+    exit 1
+  fi
+
+  case "${target_dir}/" in
+    "${install_dir}/"*)
+      ;;
+    *)
+      log "Refusing to remove outside install dir (${install_dir}): ${target_dir}"
+      exit 1
+      ;;
+  esac
+
+  if [[ "${NON_INTERACTIVE}" -ne 1 ]]; then
+    if ! confirm "Remove ${target_dir}?"; then
+      log "Canceled."
+      exit 1
+    fi
+  fi
+
+  rm -rf "${target_dir}"
+  log "Removed ${target_dir}"
+}
+
+collect_dotnet_lists() {
+  local dotnet_bin="$1"
+  local dotnet_env=(
+    DOTNET_CLI_TELEMETRY_OPTOUT=1
+    DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
+    DOTNET_NOLOGO=1
+  )
+
+  sdk_lines=()
+  runtime_lines=()
+
+  log "Collecting installed SDKs..."
+  local sdk_output
+  local line
+  sdk_output=$(env "${dotnet_env[@]}" "${dotnet_bin}" --list-sdks </dev/null 2>/dev/null || true)
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    sdk_lines+=("${line}")
+  done <<<"${sdk_output}"
+
+  log "Collecting installed runtimes..."
+  local runtime_output
+  runtime_output=$(env "${dotnet_env[@]}" "${dotnet_bin}" --list-runtimes </dev/null 2>/dev/null || true)
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    runtime_lines+=("${line}")
+  done <<<"${runtime_output}"
+}
+
+remove_sdk_version() {
+  local install_dir="$1"
+  local version="$2"
+  local line base_path entry_version
+
+  for line in "${sdk_lines[@]}"; do
+    entry_version=${line%% *}
+    if [[ "${entry_version}" == "${version}" ]]; then
+      base_path=${line#*[}
+      base_path=${base_path%]}
+      remove_target_dir "${base_path}/${entry_version}" "${install_dir}"
+      return 0
+    fi
+  done
+
+  log "SDK version not found: ${version}"
+  return 1
+}
+
+remove_runtime_name_version() {
+  local install_dir="$1"
+  local name="$2"
+  local version="$3"
+  local line runtime_name runtime_version runtime_path
+
+  for line in "${runtime_lines[@]}"; do
+    runtime_name=$(awk '{print $1}' <<<"${line}")
+    runtime_version=$(awk '{print $2}' <<<"${line}")
+    if [[ "${runtime_name}" == "${name}" && "${runtime_version}" == "${version}" ]]; then
+      runtime_path=${line#*[}
+      runtime_path=${runtime_path%]}
+      remove_target_dir "${runtime_path}/${runtime_version}" "${install_dir}"
+      return 0
+    fi
+  done
+
+  log "Runtime not found: ${name} ${version}"
+  return 1
+}
+
+main() {
+  parse_args "$@"
+
+  log "Checking for Homebrew-managed .NET..."
+  if is_brew_dotnet_installed; then
+    log "Detected Homebrew-managed .NET (${BREW_DOTNET_PACKAGE}). Use brew to manage installs."
+    log "Example: brew uninstall ${BREW_DOTNET_PACKAGE}"
+    exit 0
+  fi
+
+  if ! command_exists dotnet; then
+    log "dotnet not found in PATH. Nothing to remove."
+    exit 1
+  fi
+  local dotnet_bin
+  dotnet_bin=$(command -v dotnet)
+
+  local install_dir="${DOTNET_ROOT:-$HOME/.dotnet}"
+  install_dir="${install_dir%/}"
+
+  local sdk_lines=()
+  local runtime_lines=()
+
+  collect_dotnet_lists "${dotnet_bin}"
+
+  if [[ ${#sdk_lines[@]} -eq 0 && ${#runtime_lines[@]} -eq 0 ]]; then
+    log "No SDKs or runtimes detected via dotnet."
+    exit 1
+  fi
+
+  if [[ -n "${SDK_VERSION}" ]]; then
+    if ! remove_sdk_version "${install_dir}" "${SDK_VERSION}"; then
+      exit 1
+    fi
+    exit 0
+  fi
+
+  if [[ -n "${RUNTIME_NAME}" ]]; then
+    if ! remove_runtime_name_version "${install_dir}" "${RUNTIME_NAME}" "${RUNTIME_VERSION}"; then
+      exit 1
+    fi
+    exit 0
+  fi
+  while true; do
+    local categories=()
+    local category_labels=()
+    if [[ ${#sdk_lines[@]} -gt 0 ]]; then
+      categories+=("sdk")
+      category_labels+=("SDK")
+    fi
+    if [[ ${#runtime_lines[@]} -gt 0 ]]; then
+      categories+=("runtime")
+      category_labels+=("Runtime")
+    fi
+
+    local category=""
+    if [[ ${#categories[@]} -eq 1 ]]; then
+      category="${categories[0]}"
+    else
+      local category_index
+      if ! category_index=$(choose_from_list "Choose what to remove:" "${category_labels[@]}"); then
+        log "Canceled."
+        exit 1
+      fi
+      category="${categories[${category_index}]}"
+    fi
+
+    if [[ "${category}" == "sdk" ]]; then
+      local sdk_versions=()
+      local sdk_paths=()
+      local sdk_labels=()
+      local line version base_path
+      for line in "${sdk_lines[@]}"; do
+        version=${line%% *}
+        base_path=${line#*[}
+        base_path=${base_path%]}
+        sdk_versions+=("${version}")
+        sdk_paths+=("${base_path}")
+        sdk_labels+=("${version}")
+      done
+
+      local sdk_index
+      if ! sdk_index=$(choose_from_list "Choose an SDK version to remove:" "${sdk_labels[@]}"); then
+        log "Canceled."
+        exit 1
+      fi
+
+      local target_dir="${sdk_paths[${sdk_index}]}/${sdk_versions[${sdk_index}]}"
+      remove_target_dir "${target_dir}" "${install_dir}"
+    else
+      local runtime_names=()
+      local runtime_versions=()
+      local runtime_paths=()
+      local runtime_labels=()
+      local line runtime_name runtime_version runtime_path
+      for line in "${runtime_lines[@]}"; do
+        runtime_name=$(awk '{print $1}' <<<"${line}")
+        runtime_version=$(awk '{print $2}' <<<"${line}")
+        runtime_path=${line#*[}
+        runtime_path=${runtime_path%]}
+        runtime_names+=("${runtime_name}")
+        runtime_versions+=("${runtime_version}")
+        runtime_paths+=("${runtime_path}")
+        runtime_labels+=("${runtime_name} ${runtime_version}")
+      done
+
+      local runtime_index
+      if ! runtime_index=$(choose_from_list "Choose a runtime to remove:" "${runtime_labels[@]}"); then
+        log "Canceled."
+        exit 1
+      fi
+
+      local target_dir="${runtime_paths[${runtime_index}]}/${runtime_versions[${runtime_index}]}"
+      remove_target_dir "${target_dir}" "${install_dir}"
+    fi
+
+    collect_dotnet_lists "${dotnet_bin}"
+    if [[ ${#sdk_lines[@]} -eq 0 && ${#runtime_lines[@]} -eq 0 ]]; then
+      log "No SDKs or runtimes detected via dotnet."
+      exit 0
+    fi
+
+    if ! confirm "Remove anything else?"; then
+      break
+    fi
+  done
+
+  log "Note: this script only removes the selected SDK/runtime directory."
+  log "Other content (like packs or tool caches) may remain under ${install_dir}."
+}
+
+main "$@"

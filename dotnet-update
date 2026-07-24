@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() {
+  printf '==> %s\n' "$1"
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+usage() {
+  cat <<'USAGE'
+Usage: dotnet-update [--lts | --sts | --channel <value>] [--help]
+
+Options:
+  --lts                Install the latest Long-Term Support release (default).
+  --sts                Install the latest Short-Term Support release (maps to the "STS" channel).
+  --channel <value>    Pass an explicit channel to dotnet-install (e.g., "Current", "9.0", "preview").
+  -h, --help           Show this help message and exit.
+
+The channel option only affects installs performed via the Microsoft installer. Homebrew-managed
+installs are upgraded using the existing formula or cask version.
+USAGE
+}
+
+DOTNET_CHANNEL="LTS"
+
+parse_args() {
+  DOTNET_CHANNEL="LTS"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --lts)
+        DOTNET_CHANNEL="LTS"
+        shift
+        ;;
+      --sts)
+        DOTNET_CHANNEL="STS"
+        shift
+        ;;
+      --channel)
+        if [[ $# -lt 2 ]]; then
+          log "Missing value for --channel"
+          usage
+          exit 1
+        fi
+        DOTNET_CHANNEL="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        log "Unknown option: $1"
+        usage
+        exit 1
+        ;;
+    esac
+  done
+}
+
+BREW_DOTNET_PACKAGE=""
+BREW_DOTNET_IS_CASK=0
+
+is_brew_dotnet_installed() {
+  if ! command_exists brew; then
+    return 1
+  fi
+
+  if brew list dotnet >/dev/null 2>&1; then
+    BREW_DOTNET_PACKAGE="dotnet"
+    BREW_DOTNET_IS_CASK=0
+    return 0
+  fi
+
+  if brew list dotnet-sdk >/dev/null 2>&1; then
+    BREW_DOTNET_PACKAGE="dotnet-sdk"
+    BREW_DOTNET_IS_CASK=0
+    return 0
+  fi
+
+  local casks
+  casks=$(brew list --cask 2>/dev/null || true)
+  if grep -qx 'dotnet-sdk' <<<"${casks}"; then
+    BREW_DOTNET_PACKAGE="dotnet-sdk"
+    BREW_DOTNET_IS_CASK=1
+    return 0
+  fi
+
+  if grep -qx 'dotnet' <<<"${casks}"; then
+    BREW_DOTNET_PACKAGE="dotnet"
+    BREW_DOTNET_IS_CASK=1
+    return 0
+  fi
+
+  return 1
+}
+
+update_via_brew() {
+  log "Updating Homebrew..."
+  brew update
+
+  local package=${BREW_DOTNET_PACKAGE:-dotnet}
+  if [[ ${BREW_DOTNET_IS_CASK} -eq 1 ]]; then
+    log "Upgrading ${package} cask via Homebrew..."
+    brew upgrade --cask "${package}"
+  else
+    log "Upgrading ${package} via Homebrew..."
+    brew upgrade "${package}"
+  fi
+}
+
+install_via_microsoft() {
+  local install_dir="$HOME/.dotnet"
+  mkdir -p "${install_dir}"
+
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  trap 'rm -rf "${tmp_dir}"' EXIT
+
+  local install_script="${tmp_dir}/dotnet-install.sh"
+  log "Downloading dotnet-install.sh from Microsoft..."
+  curl -sSL https://dot.net/v1/dotnet-install.sh -o "${install_script}"
+
+  local channel_args=()
+  if [[ -n "${DOTNET_CHANNEL}" ]]; then
+    channel_args+=("--channel" "${DOTNET_CHANNEL}")
+  fi
+
+  log "Running dotnet-install.sh into ${install_dir} (channel: ${DOTNET_CHANNEL})..."
+  bash "${install_script}" --install-dir "${install_dir}" "${channel_args[@]}"
+
+  rm -rf "${tmp_dir}"
+  trap - EXIT
+}
+
+append_shell_exports() {
+  local file="$1"
+  local dotnet_root_export='export DOTNET_ROOT="$HOME/.dotnet"'
+  local path_export='export PATH="$DOTNET_ROOT:$PATH"'
+
+  if [[ ! -f "${file}" ]]; then
+    touch "${file}"
+  fi
+
+  if ! grep -Fq "$dotnet_root_export" "${file}"; then
+    printf '\n%s\n' "$dotnet_root_export" >> "${file}"
+    log "Added DOTNET_ROOT to ${file}."
+  fi
+
+  if ! grep -Fq "$path_export" "${file}"; then
+    printf '\n%s\n' "$path_export" >> "${file}"
+    log "Added PATH update to ${file}."
+  fi
+}
+
+export_dotnet_path_for_session() {
+  export DOTNET_ROOT="$HOME/.dotnet"
+  if [[ ":${PATH}:" != *":${DOTNET_ROOT}:"* ]]; then
+    export PATH="${DOTNET_ROOT}:${PATH}"
+  fi
+}
+
+main() {
+  parse_args "$@"
+  local used_microsoft_install=0
+
+  if is_brew_dotnet_installed; then
+    log "Detected Homebrew-managed .NET installation."
+    update_via_brew
+  else
+    used_microsoft_install=1
+    log "No Homebrew-managed .NET installation detected. Using Microsoft installer."
+    install_via_microsoft
+  fi
+
+  if [[ ${used_microsoft_install} -eq 1 ]]; then
+    append_shell_exports "$HOME/.zprofile"
+    append_shell_exports "$HOME/.zshrc"
+    export_dotnet_path_for_session
+  fi
+
+  log "dotnet --info:"
+  dotnet --info
+}
+
+main "$@"
