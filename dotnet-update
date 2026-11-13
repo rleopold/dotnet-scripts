@@ -11,16 +11,15 @@ command_exists() {
 
 usage() {
   cat <<'USAGE'
-Usage: dotnet-update [--lts | --sts | --all | --channel <value> [--quality <value>]] [--help]
+Usage: dotnet-update (--all | --channel <value> [--quality <value>])
+       dotnet-update --help
 
 Options:
-  --lts                Install the latest Long-Term Support release (default).
-  --sts                Install the latest Short-Term Support release (maps to the "STS" channel).
   --all                Update every installed SDK channel. Stable channels use GA builds;
                        prerelease-only channels use preview builds.
   --channel <value>    Install from a numbered channel (for example, "11.0" or "11.0.1xx").
   --quality <value>    Install the latest GA, preview, or daily build in the specified channel.
-                       Requires --channel and cannot be combined with --lts or --sts.
+                       Requires --channel.
   -h, --help           Show this help message and exit.
 
 The channel and quality options only affect installs performed via the Microsoft installer.
@@ -28,32 +27,31 @@ Homebrew-managed installs are upgraded using the existing formula or cask versio
 USAGE
 }
 
-DOTNET_CHANNEL="LTS"
+DOTNET_CHANNEL=""
 DOTNET_QUALITY=""
 EXPLICIT_CHANNEL=0
-EXPLICIT_SELECTION=0
 UPDATE_ALL=0
 
 parse_args() {
-  DOTNET_CHANNEL="LTS"
+  DOTNET_CHANNEL=""
   DOTNET_QUALITY=""
   EXPLICIT_CHANNEL=0
-  EXPLICIT_SELECTION=0
   UPDATE_ALL=0
+  if [[ $# -eq 0 ]]; then
+    log "Specify --channel <value> or --all."
+    usage
+    printf '\n'
+    if command_exists dotnet; then
+      log "dotnet --info:"
+      dotnet --info
+    else
+      log "dotnet is not on PATH."
+    fi
+    exit 1
+  fi
+
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --lts)
-        DOTNET_CHANNEL="LTS"
-        EXPLICIT_CHANNEL=0
-        EXPLICIT_SELECTION=1
-        shift
-        ;;
-      --sts)
-        DOTNET_CHANNEL="STS"
-        EXPLICIT_CHANNEL=0
-        EXPLICIT_SELECTION=1
-        shift
-        ;;
       --all)
         UPDATE_ALL=1
         shift
@@ -65,8 +63,12 @@ parse_args() {
           exit 1
         fi
         DOTNET_CHANNEL="$2"
+        if [[ ! "${DOTNET_CHANNEL}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+xx)?$ ]]; then
+          log "--channel requires a numbered channel such as 11.0 or 11.0.1xx."
+          usage
+          exit 1
+        fi
         EXPLICIT_CHANNEL=1
-        EXPLICIT_SELECTION=1
         shift 2
         ;;
       --quality)
@@ -105,8 +107,8 @@ parse_args() {
     esac
   done
 
-  if [[ "${UPDATE_ALL}" -eq 1 && "${EXPLICIT_SELECTION}" -eq 1 ]]; then
-    log "--all cannot be combined with --lts, --sts, or --channel."
+  if [[ "${UPDATE_ALL}" -eq 1 && "${EXPLICIT_CHANNEL}" -eq 1 ]]; then
+    log "--all cannot be combined with --channel."
     usage
     exit 1
   fi
@@ -117,13 +119,16 @@ parse_args() {
     exit 1
   fi
 
-  if [[ -n "${DOTNET_QUALITY}" ]]; then
-    if [[ "${EXPLICIT_CHANNEL}" -ne 1 ]] ||
-      [[ ! "${DOTNET_CHANNEL}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+xx)?$ ]]; then
-      log "--quality requires a numbered --channel such as 11.0 or 11.0.1xx."
-      usage
-      exit 1
-    fi
+  if [[ -n "${DOTNET_QUALITY}" && "${EXPLICIT_CHANNEL}" -ne 1 ]]; then
+    log "--quality requires a numbered --channel such as 11.0 or 11.0.1xx."
+    usage
+    exit 1
+  fi
+
+  if [[ "${UPDATE_ALL}" -ne 1 && "${EXPLICIT_CHANNEL}" -ne 1 ]]; then
+    log "Specify --channel <value> or --all."
+    usage
+    exit 1
   fi
 }
 
@@ -237,6 +242,22 @@ update_via_brew() {
   fi
 }
 
+sort_sdk_versions() {
+  # Compare the numeric version first, then place stable releases above
+  # prereleases with the same version. sort -V alone puts RCs above GA.
+  awk '{
+    original = $0
+    version = original
+    sub(/\+.*/, "", version)
+    core = version
+    sub(/-.*/, "", core)
+    stable = (version == core)
+    prerelease = "-"
+    if (!stable) prerelease = substr(version, length(core) + 2)
+    print core, stable, prerelease, original
+  }' | sort -k1,1V -k2,2n -k3,3V | awk '{ print $4 }'
+}
+
 highest_installed_sdk_version() {
   local install_dir="$1"
   local sdk_dir="${install_dir}/sdk"
@@ -257,7 +278,7 @@ highest_installed_sdk_version() {
     return 0
   fi
 
-  printf '%s\n' "${versions[@]}" | sort -V | tail -n 1
+  printf '%s\n' "${versions[@]}" | sort_sdk_versions | tail -n 1
 }
 
 resolve_target_version() {
@@ -298,7 +319,7 @@ run_microsoft_installer() {
   target_version=$(resolve_target_version "${install_script}" "${install_dir}" "${channel_args[@]}")
   if [[ -n "${installed_version}" && -n "${target_version}" ]]; then
     local newest
-    newest=$(printf '%s\n%s\n' "${installed_version}" "${target_version}" | sort -V | tail -n 1)
+    newest=$(printf '%s\n%s\n' "${installed_version}" "${target_version}" | sort_sdk_versions | tail -n 1)
     if [[ "${newest}" != "${target_version}" ]]; then
       log "Target ${target_version} is older than installed ${installed_version}; preserving non-versioned files."
       installer_args+=("--skip-non-versioned-files")
