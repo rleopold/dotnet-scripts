@@ -14,17 +14,28 @@ Updates or installs .NET using either Homebrew (if detected) or the Microsoft in
 Usage:
 
 ```bash
-./dotnet-update [--lts | --sts | --all | --channel <value> [--quality <value>]]
+./dotnet-update --channel <value> [--quality <value>]
+./dotnet-update --all
 ```
 
 Options:
-- `--lts` (default): Install the latest Long-Term Support release.
-- `--sts`: Install the latest Short-Term Support release.
 - `--all`: Update every installed SDK channel. Channels with a stable SDK update to the latest
   `GA` build; channels containing only prerelease SDKs update to the latest `preview` build.
 - `--channel <value>`: Install from a numbered channel (for example: `11.0` or `11.0.1xx`).
 - `--quality <value>`: Install the latest `GA`, `preview`, or `daily` build in the specified
-  channel. This requires `--channel` and cannot be combined with `--lts` or `--sts`.
+  channel. This requires `--channel`.
+
+Specify either `--channel` or `--all`; running without arguments prints usage followed by
+`dotnet --info` and exits with code `1`. If `dotnet` is not on PATH, it prints a message instead.
+Use `--help` to print only usage and exit with code `0`.
+The `--lts` and `--sts` options are no longer supported. Choose a numbered channel explicitly
+to control major-version upgrades without relying on Microsoft's LTS/STS download aliases.
+
+For example, install the latest SDK in the .NET 11 channel:
+
+```bash
+./dotnet-update --channel 11.0
+```
 
 For example, install the latest public .NET 11 preview:
 
