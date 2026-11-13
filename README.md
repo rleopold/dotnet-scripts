@@ -2,14 +2,23 @@
 
 Handy helpers for managing a .NET SDK install on macOS and Linux development machines.
 
-These scripts assume you install .NET via the Microsoft `dotnet-install.sh` script (typically under
-`~/.dotnet`). If Homebrew manages your .NET installation, the scripts will defer to `brew`.
+These scripts use Microsoft's `dotnet-install.sh` installer and manage SDKs under `~/.dotnet`.
+If Homebrew manages your .NET installation, the scripts will defer to `brew`.
 
 ## Scripts
 
 ### dotnet-update
 
 Updates or installs .NET using either Homebrew (if detected) or the Microsoft installer.
+
+No existing .NET installation is required. To install your first SDK into `~/.dotnet`, run:
+
+```bash
+./dotnet-update --channel 11.0
+```
+
+The `--all` option requires an existing SDK installation with `dotnet` on PATH so it can
+discover the installed channels.
 
 Usage:
 
